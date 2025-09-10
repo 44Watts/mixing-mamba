@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Reynolds Industries — Liquid Snake</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ri-navy:#2a3e63; --ri-navy-2:#1c2b49;
+    --bg:#eef2f8; --hud-chip:rgba(42,62,99,.10);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:#0f1830;
+    font-family:'Press Start 2P', system-ui, monospace;
+    text-align:center; overflow:hidden;
+  }
+
+  header{
+    position:sticky; top:0; z-index:10;
+    background:#fff; padding:10px 10px 6px; border-bottom:1px solid #e5ebf6;
+  }
+  .brand{display:flex; gap:12px; align-items:center; justify-content:center; flex-wrap:wrap}
+  .ri-strong,.ri-soft{color:var(--ri-navy); font-size:22px; letter-spacing:1px}
+  .ri-soft{opacity:.85}
+
+  .hud{display:flex; gap:8px; justify-content:center; align-items:center; flex-wrap:wrap; margin-top:6px}
+  .chip{
+    display:inline-flex; align-items:center; gap:6px; line-height:1;
+    padding:6px 10px; border-radius:9999px; background:var(--hud-chip); color:#1a2a48; font-size:12px;
+    border:1px solid rgba(42,62,99,.15)
+  }
+
+  #statusBanner{
+    margin:8px auto 6px; padding:8px 10px; border-radius:10px;
+    width:min(760px,92vw); background:#ffffff; color:#0f1830;
+    border:1px solid #e8edf5; box-shadow:0 6px 24px rgba(16,35,66,.08);
+    opacity:0; transform:translateY(-6px); transition:opacity .25s, transform .25s;
+    font-size:12px
+  }
+  #statusBanner.show{opacity:1; transform:translateY(0)}
+
+  #game{
+    display:block; margin:8px auto 10px;
+    width:min(92vw,720px); height:min(92vw,720px);
+    max-width:720px; max-height:720px;
+    border-radius:16px; background:linear-gradient(180deg,var(--ri-navy),var(--ri-navy-2));
+    box-shadow:0 2px 3px rgba(9,22,43,.03), 0 14px 32px rgba(9,22,43,.10);
+    touch-action:manipulation;
+  }
+
+  .controls{margin:0 0 10px}
+  .dpad{display:inline-grid; grid-template-columns:repeat(3,52px); gap:6px}
+  .dpad button{
+    font-family:'Press Start 2P', monospace; font-size:13px;
+    padding:10px 0; border:none; border-radius:10px; cursor:pointer;
+    background:#f3f6fd; color:#1a2742; box-shadow:0 6px 18px rgba(0,0,0,.12)
+  }
+  .dpad .blank{visibility:hidden}
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand" aria-label="Reynolds Industries">
+      <div class="ri-strong">REYNOLDS</div>
+      <div class="ri-soft">INDUSTRIES</div>
+    </div>
+    <div class="hud" aria-label="Scoreboard">
+      <div class="chip">Batches Mixed: <span id="score">0</span></div>
+      <div class="chip">High Score: <span id="high">0</span></div>
+    </div>
+  </header>
+
+  <div id="statusBanner" role="status" aria-live="polite"></div>
+
+  <canvas id="game" width="600" height="600" aria-label="Liquid Snake board"></canvas>
+
+  <div class="controls" aria-label="On-screen controls">
+    <div class="dpad">
+      <span class="blank"></span><button id="up" title="Up">↑</button><span class="blank"></span>
+      <button id="left" title="Left">←</button><button id="down" title="Down">↓</button><button id="right" title="Right">→</button>
+    </div>
+  </div>
+
+<script>
+(() => {
+  /* Board + speed */
+  const CELL=30, COLS=20, ROWS=20, TICK_MS=95;
+
+  /* 10 industrial liquids (no pigments) */
+  const LIQUIDS = [
+    {name:'Water',   hex:'#59c6ff'},
+    {name:'Oil',     hex:'#ffc94d'},
+    {name:'Resin',   hex:'#e6eef5'},
+    {name:'Additive',hex:'#2fc3a5'},
+    {name:'Solvent', hex:'#bfe5ff'},
+    {name:'Coolant', hex:'#3db8b3'},
+    {name:'Emulsion',hex:'#f5f7fa'},
+    {name:'Slurry',  hex:'#6b5d53'},
+    {name:'Acid',    hex:'#a6f542'},
+    {name:'Fuel',    hex:'#ff6f3c'},
+{name:'Pigment', hex:'#f542cb'},
+{name:'Coating', hex:'#42f59b'},
+{name:'Paint', hex:'#e33d40'},
+{name:'Ink', hex:'#e39e3d'},
+{name:'Adhesive', hex:'#e6e5e3'}, 
+{name:'Sealant', hex:'#f2fbff'}, 
+{name:'Silicone', hex:'#b3b3b3'}, 
+{name:'Caulk', hex:'#f7f7f2'}, 
+{name:'Rubber', hex:'#f7addc'}
+  ];
+
+  /* Liquid stroke thickness (looks good vs grid cell size) */
+  const LIQUID_DIAM = Math.floor(CELL*0.70);
+
+  const canvas = document.getElementById('game');
+  const c = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const highEl  = document.getElementById('high');
+  const banner  = document.getElementById('statusBanner');
+
+  let snake, dir, nextDir, food, score, high, loop, overlayAlpha=0;
+  let queuedGrowth = 2;
+  let mode='start', won=false;
+  let current = LIQUIDS[0];
+  let lastLiquid = null; // for no-repeat spawning
+
+  const randInt = n => Math.floor(Math.random()*n);
+
+  function pickLiquidNoRepeat() {
+    let choice;
+    do { choice = LIQUIDS[randInt(LIQUIDS.length)]; }
+    while (lastLiquid && choice.name === lastLiquid.name);
+    lastLiquid = choice;
+    return choice;
+  }
+
+  high = Number(localStorage.getItem('ri_liquid_snake_high_stroke') || 0);
+  highEl.textContent = high;
+
+  function reset(){
+    snake=[{x:Math.floor(COLS/2), y:Math.floor(ROWS/2)}];
+    dir={x:1,y:0}; nextDir={x:1,y:0};
+    queuedGrowth=2; score=0; overlayAlpha=0; won=false;
+    current = LIQUIDS[0];
+    lastLiquid = current; // ensure first spawn differs from current
+    hideBanner(); food=spawnFood(); updateHUD(); render();
+  }
+
+  function spawnFood(){
+    let pos; do { pos={x:randInt(COLS), y:randInt(ROWS)}; }
+    while (snake.some(s=>s.x===pos.x && s.y===pos.y));
+    return {...pos, liquid: pickLiquidNoRepeat()};
+  }
+
+  function showBanner(text, color){
+    banner.textContent = `Now mixing: ${text}`;
+    banner.style.boxShadow = `0 6px 24px ${hexToRGBA(color,.22)}`;
+    banner.style.borderColor = hexToRGBA(color,.35);
+    banner.classList.add('show'); clearTimeout(showBanner._t);
+    showBanner._t = setTimeout(()=>banner.classList.remove('show'), 1600);
+  }
+  function hideBanner(){ banner.classList.remove('show'); clearTimeout(showBanner._t); }
+  function updateHUD(){ scoreEl.textContent = score; highEl.textContent = high; }
+
+  /* ===== Rendering ===== */
+
+  function drawGrid(){
+    c.save();
+    c.lineWidth = 1;
+    c.strokeStyle = 'rgba(255,255,255,.12)';
+    for (let x=1; x<COLS; x++){
+      const px = Math.floor(x*CELL)+0.5;
+      c.beginPath(); c.moveTo(px, 0); c.lineTo(px, ROWS*CELL); c.stroke();
+    }
+    for (let y=1; y<ROWS; y++){
+      const py = Math.floor(y*CELL)+0.5;
+      c.beginPath(); c.moveTo(0, py); c.lineTo(COLS*CELL, py); c.stroke();
+    }
+    c.restore();
+  }
+
+  function cellCenter(grid){
+    return { cx: grid.x*CELL + CELL/2, cy: grid.y*CELL + CELL/2 };
+  }
+
+  /* Main shiny liquid stroke (no shadow stripe) */
+  function drawLiquidPath(strokeColor){
+    const pts = snake.map(cellCenter);
+    if (pts.length===0) return;
+
+    c.save();
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+
+    // Slight vertical gradient inside the stroke to look like fluid
+    const baseGrad = c.createLinearGradient(0, 0, 0, canvas.height);
+    baseGrad.addColorStop(0, lightenHex(strokeColor, 0.08));
+    baseGrad.addColorStop(0.5, strokeColor);
+    baseGrad.addColorStop(1, darkenHex(strokeColor, 0.06));
+
+    // Base liquid
+    c.strokeStyle = baseGrad;
+    c.lineWidth = LIQUID_DIAM;
+    c.beginPath();
+    c.moveTo(pts[0].cx, pts[0].cy);
+    for (let i=1;i<pts.length;i++) c.lineTo(pts[i].cx, pts[i].cy);
+    c.stroke();
+
+    // Top highlight (specular) – no dark edge/shadow
+    c.globalCompositeOperation = 'lighter';
+    c.strokeStyle = 'rgba(255,255,255,.28)';
+    c.lineWidth = Math.max(1, Math.floor(LIQUID_DIAM*0.16));
+    const off = Math.max(1, Math.floor(LIQUID_DIAM*0.10));
+    c.beginPath();
+    c.moveTo(pts[0].cx - off, pts[0].cy - off);
+    for (let i=1;i<pts.length;i++) c.lineTo(pts[i].cx - off, pts[i].cy - off);
+    c.stroke();
+
+    // Head gloss dot
+    const head = pts[0];
+    c.globalCompositeOperation = 'source-over';
+    c.fillStyle = 'rgba(255,255,255,.35)';
+    c.beginPath();
+    c.arc(head.cx - off*0.6, head.cy - off*0.6, Math.max(3, LIQUID_DIAM*0.20), 0, Math.PI*2);
+    c.fill();
+
+    c.restore();
+  }
+
+  // Shiny circular pickups
+  function drawPellet(f){
+    const {cx, cy} = cellCenter(f);
+    const r = Math.floor(CELL*0.38);
+
+    const g = c.createRadialGradient(cx, cy, r*0.15, cx, cy, r);
+    g.addColorStop(0, lightenHex(f.liquid.hex, 0.22));
+    g.addColorStop(0.55, f.liquid.hex);
+    g.addColorStop(1, darkenHex(f.liquid.hex, 0.20));
+
+    c.save();
+    c.shadowColor = hexToRGBA(f.liquid.hex, .50);
+    c.shadowBlur = 10;
+
+    c.fillStyle = g;
+    c.beginPath(); c.arc(cx, cy, r, 0, Math.PI*2); c.fill();
+
+    c.shadowBlur = 0;
+    c.lineWidth = 2;
+    c.strokeStyle = darkenHex(f.liquid.hex, 0.35);
+    c.beginPath(); c.arc(cx, cy, r-1, 0, Math.PI*2); c.stroke();
+
+    c.globalAlpha = .42;
+    c.fillStyle = '#ffffff';
+    c.beginPath(); c.ellipse(cx - r*0.35, cy - r*0.35, r*0.32, r*0.18, -0.7, 0, Math.PI*2); c.fill();
+    c.globalAlpha = .25;
+    c.beginPath(); c.ellipse(cx + r*0.18, cy + r*0.18, r*0.16, r*0.10, 0.3, 0, Math.PI*2); c.fill();
+
+    c.restore();
+  }
+
+  function renderStartOverlay(){
+    c.save();
+    c.fillStyle='rgba(255,255,255,.92)';
+    c.fillRect(0,0,canvas.width,canvas.height);
+    c.fillStyle='#1d2c4a';
+    c.textAlign='center';
+    c.font='20px "Press Start 2P", monospace';
+    c.fillText('Mixing Mamba', canvas.width/2, canvas.height/2 - 100);
+    c.font='12px "Press Start 2P", monospace';
+    const lines=[
+'Mix products.',
+      'Arrows / WASD to move.',
+'Press any key or tap to begin.'
+    ];
+    let y=canvas.height/2 - 50;
+    for(const L of lines){ c.fillText(L, canvas.width/2, y); y+=26; }
+    c.font='14px "Press Start 2P", monospace';
+    c.fillText('START', canvas.width/2, canvas.height/2 + 50);
+    c.restore();
+  }
+
+  function renderGameOverOverlay(){
+    if (overlayAlpha<=0) return;
+    c.save();
+    c.globalAlpha=overlayAlpha;
+    c.fillStyle='rgba(255,255,255,.96)';
+    c.fillRect(0,0,canvas.width,canvas.height);
+    c.globalAlpha=1; c.fillStyle='#1d2c4a';
+    c.textAlign='center';
+    c.font='20px "Press Start 2P", monospace';
+    c.fillText(won ? 'Batch Complete!' : 'Contamination Detected!', canvas.width/2, canvas.height/2 - 8);
+    c.font='12px "Press Start 2P", monospace';
+    c.fillText('Press any key or tap to mix again', canvas.width/2, canvas.height/2 + 26);
+    c.restore();
+  }
+
+  function render(){
+    c.clearRect(0,0,canvas.width,canvas.height);
+    drawGrid();
+    drawPellet(food);
+    drawLiquidPath(current.hex);
+    if (mode==='start') renderStartOverlay();
+    if (mode==='gameover') renderGameOverOverlay();
+  }
+
+  /* ===== Game loop ===== */
+  function step(){
+    if (mode!=='play'){ render(); return; }
+
+    dir=nextDir;
+    const head={x:snake[0].x+dir.x, y:snake[0].y+dir.y};
+    if (head.x<0||head.x>=COLS||head.y<0||head.y>=ROWS) return gameOver(false);
+    if (snake.some(s=>s.x===head.x && s.y===head.y)) return gameOver(false);
+
+    snake.unshift(head);
+    if (queuedGrowth>0) queuedGrowth--; else snake.pop();
+
+    if (head.x===food.x && head.y===food.y){
+      score++; queuedGrowth+=1;
+      current = food.liquid;
+      lastLiquid = current; // so next spawn differs
+      showBanner(current.name, current.hex);
+      if (score>high){ high=score; localStorage.setItem('ri_liquid_snake_high_stroke', String(high)); }
+      if (snake.length >= COLS*ROWS) return gameOver(true); // win condition
+      food=spawnFood(); updateHUD();
+    }
+    render();
+  }
+
+  function gameOver(didWin){
+    mode='gameover'; won = !!didWin;
+    clearInterval(loop);
+    overlayAlpha = 0;
+    const fade = () => {
+      overlayAlpha = Math.min(1, overlayAlpha + 0.08);
+      render();
+      if (overlayAlpha < 1) requestAnimationFrame(fade);
+    };
+    fade();
+  }
+
+  /* Controls */
+  function setDir(x,y){ if (snake.length>1 && x===-dir.x && y===-dir.y) return; nextDir={x,y}; }
+  window.addEventListener('keydown', (e)=>{
+    const k=e.key.toLowerCase();
+    const scrollKeys=['arrowup','arrowdown','arrowleft','arrowright',' '];
+    if (scrollKeys.includes(k)||k==='pageup'||k==='pagedown') e.preventDefault();
+    if (mode!=='play') start();
+
+    if (k==='arrowup'||k==='w') setDir(0,-1);
+    else if (k==='arrowdown'||k==='s') setDir(0,1);
+    else if (k==='arrowleft'||k==='a') setDir(-1,0);
+    else if (k==='arrowright'||k==='d') setDir(1,0);
+  }, {passive:false});
+  document.getElementById('up').onclick   = ()=>{ if(mode!=='play') start(); setDir(0,-1); };
+  document.getElementById('down').onclick = ()=>{ if(mode!=='play') start(); setDir(0,1);  };
+  document.getElementById('left').onclick = ()=>{ if(mode!=='play') start(); setDir(-1,0); };
+  document.getElementById('right').onclick= ()=>{ if(mode!=='play') start(); setDir(1,0);  };
+  canvas.addEventListener('pointerdown', ()=>{ if(mode!=='play') start(); }, {passive:true});
+
+  function start(){
+    reset(); mode='play';
+    clearInterval(loop); loop=setInterval(step, TICK_MS);
+  }
+
+  /* Color utils */
+  function hexToRGBA(hex,a=1){ const {r,g,b}=hexToRGB(hex); return `rgba(${r},${g},${b},${a})`; }
+  function hexToRGB(hex){
+    const h=hex.replace('#','');
+    const b=h.length===3? h.split('').map(ch=>parseInt(ch+ch,16))
+                        : [parseInt(h.substring(0,2),16),parseInt(h.substring(2,4),16),parseInt(h.substring(4,6),16)];
+    return {r:b[0],g:b[1],b:b[2]};
+  }
+  function lightenHex(hex, amt){ const {r,g,b}=hexToRGB(hex); const f=(v)=>Math.min(255,Math.round(v+255*amt)); return rgbToHex(f(r),f(g),f(b)); }
+  function darkenHex(hex, amt){ const {r,g,b}=hexToRGB(hex); const f=(v)=>Math.max(0,Math.round(v-255*amt)); return rgbToHex(f(r),f(g),f(b)); }
+  function rgbToHex(r,g,b){ return '#' + [r,g,b].map(v=>v.toString(16).padStart(2,'0')).join(''); }
+
+  // init
+  reset(); mode='start'; render();
+})();
+</script>
+</body>
+</html>
